@@ -94,6 +94,42 @@ jobs:
           sed -i '' 's/iOS: "15.5"/iOS: "16.0"/' src/app/project.yml
           grep -A2 'deploymentTarget:' src/app/project.yml | head -5
 
+      - name: Drop the PS4 layer for this build
+        run: |
+          # libhuskps4.dylib is built by scripts/build_ps4_ios.sh from two
+          # external trees that live on the author's machine
+          # (Bachata-S4 branch husk, husk-fex branch husk-fex) and are
+          # never fetched by ci_build.sh, so a clean checkout can never
+          # produce it and Xcode fails with "couldn't be opened because
+          # there is no such file". It is embedded, not linked, and only
+          # opened by path for PS4 games on iOS 17.4+; the Android
+          # translation layer this build is for does not need it.
+          # Remove its embed entry from project.yml and from
+          # package_ipa.sh's bundle check so the build can proceed
+          # without PS4 support.
+          python3 - <<'PYEOF'
+          import re
+          p = 'src/app/project.yml'
+          lines = open(p).read().splitlines(keepends=True)
+          out = []
+          i = 0
+          while i < len(lines):
+              if 'libhuskps4.dylib' in lines[i] and lines[i].lstrip().startswith('- framework:'):
+                  i += 4  # framework line + embed/codeSign/link lines
+                  continue
+              out.append(lines[i])
+              i += 1
+          open(p, 'w').writelines(out)
+          s = open('scripts/package_ipa.sh').read()
+          s = s.replace('libANGLE-shared.dylib libhuskps4.dylib', 'libANGLE-shared.dylib')
+          open('scripts/package_ipa.sh', 'w').write(s)
+          PYEOF
+          echo "--- project.yml still mentions huskps4? ---"
+          grep -c 'libhuskps4' src/app/project.yml || true
+          echo "--- package_ipa.sh bundle check ---"
+          grep -n 'for lib in libqemu' scripts/package_ipa.sh
+          python3 -c "import yaml; yaml.safe_load(open('src/app/project.yml')); print('project.yml still parses')"
+
       - name: Build IPA
         run: ./scripts/ci_build.sh build/Husk-zh.ipa
 
