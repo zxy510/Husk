@@ -1,0 +1,96 @@
+name: Build Husk zh-Hans IPA
+
+# Use this version when the patch itself could not be pushed to the fork:
+# the workflow downloads the patch, applies it, then builds. No Mac and
+# no signing team are needed (scripts/package_ipa.sh builds with
+# CODE_SIGNING_ALLOWED=NO and SideStore / AltStore re-sign at install).
+#
+# How to use:
+#   1. Fork Leviidev/Husk on GitHub (already done: zxy510/Husk).
+#   2. On the fork's GitHub page: Add file -> Create new file,
+#      path: .github/workflows/build-husk-zh-from-patch.yml,
+#      paste this whole file, Commit changes to main.
+#   3. The push to main starts this workflow automatically.
+#   4. When it finishes, download the Husk-zh-IPA artifact and install
+#      the .ipa with SideStore / AltStore (not the .tipa on iOS 27).
+# NOTE: PATCH_URL below is a Muse storage link that expires
+# 2026-11-03 10:10 UTC. Create the workflow file and start the build
+# before then; the build downloads the patch at its start, so it only
+# needs to be alive when the run begins. If it has expired, ask for a
+# fresh patch link and update PATCH_URL.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  PATCH_URL: https://muse.ai/files/1378837521970292/2311068493009111/voxe1h61e9bont1aj0k4p9j2/Husk-zh-JIT.patch
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Download and apply the zh-Hans patch
+        run: |
+          curl -fL --retry 3 --retry-delay 5 "$PATCH_URL" -o /tmp/husk-zh.patch
+          ls -l /tmp/husk-zh.patch
+          git apply --check /tmp/husk-zh.patch
+          git apply /tmp/husk-zh.patch
+          git status --short
+          git diff --stat
+
+      - name: Show Xcode
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install build tools
+        run: |
+          brew install meson ninja pkg-config xcodegen cmake
+          rustup target add aarch64-apple-ios
+          rustup show
+
+      - name: Cache Husk dependencies and native builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/sources
+            third_party/build
+            build/ios-arm64
+            build/stamps
+            build/java-runtime
+          key: husk-${{ runner.os }}-${{ hashFiles('scripts/sources.sh', 'scripts/*.sh') }}
+          restore-keys: |
+            husk-${{ runner.os }}-
+
+      - name: Build IPA
+        run: ./scripts/ci_build.sh build/Husk-zh.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk-zh-IPA
+          path: |
+            build/Husk-zh.ipa
+            build/Husk-zh.tipa
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk-zh-build-log
+          path: |
+            build/logs
+            /tmp/husk_ipa/build.log
+          retention-days: 7
+          if-no-files-found: ignore
