@@ -82,6 +82,18 @@ jobs:
           restore-keys: |
             husk-${{ runner.os }}-
 
+      - name: Raise deployment target to iOS 16.0
+        run: |
+          # Upstream project.yml targets iOS 15.5 (with Compat15.swift
+          # shimming iOS 16 SwiftUI), but the runner's Xcode 26 SDK
+          # rejects ProfileView.swift's `if` builders with
+          # "'buildIf' is only available in iOS 16.0 or newer".
+          # This build is for the user's iOS 27 device, so raising the
+          # minimum to 16.0 is safe here; it only means the resulting
+          # IPA will not install on iOS 15 devices.
+          sed -i '' 's/iOS: "15.5"/iOS: "16.0"/' src/app/project.yml
+          grep -A2 'deploymentTarget:' src/app/project.yml | head -5
+
       - name: Build IPA
         run: ./scripts/ci_build.sh build/Husk-zh.ipa
 
