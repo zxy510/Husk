@@ -55,6 +55,12 @@ jobs:
       - name: Install build tools
         run: |
           brew install meson ninja pkg-config xcodegen cmake
+          # virglrenderer's meson setup fails on a fresh runner with
+          # "/opt/homebrew/bin/python3 is missing modules: yaml".
+          # Homebrew's python is externally managed, so pip needs
+          # --break-system-packages here.
+          /opt/homebrew/bin/python3 -m pip install --break-system-packages pyyaml
+          /opt/homebrew/bin/python3 -c "import yaml; print('pyyaml ok', yaml.__version__)"
           rustup target add aarch64-apple-ios
           rustup show
 
