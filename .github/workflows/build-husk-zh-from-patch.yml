@@ -83,6 +83,205 @@ jobs:
           restore-keys: |
             husk-${{ runner.os }}-
 
+      # Java runtime (run #8 fix): ci_build.sh never runs
+      # scripts/build_java_runtime.sh, so runs #6/#7 shipped without the
+      # core boot jars and Java apps failed on device with "dvm: no
+      # java/lang/Object on the boot class path". These steps rebuild
+      # build/java-runtime from the version-matched Lineage guest image
+      # (releases/lineage-v2, the same image GuestImage.swift downloads)
+      # before "Build IPA". They run AFTER the cache step on purpose: the
+      # cache may restore a stale java-runtime, and build_java_runtime.sh
+      # removes and rebuilds that directory, so the fresh runtime is what
+      # the Xcode build phase copies into the app.
+      - name: Install e2fsprogs for debugfs
+        run: |
+          brew install e2fsprogs
+          DEBUGFS="$(command -v debugfs || echo /opt/homebrew/opt/e2fsprogs/sbin/debugfs)"
+          test -x "$DEBUGFS" || { echo "debugfs not found at $DEBUGFS" >&2; exit 1; }
+          "$DEBUGFS" -V 2>&1 | head -2 || true
+
+      - name: Set up JDK for the Java framework build
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download pinned R8 jar
+        run: |
+          # R8 8.5+ is required by src/java-framework/build.sh (its comment
+          # says the d8 in build-tools 34 crashes on these classes, so do
+          # not substitute d8). Version 8.10.24 was verified against the
+          # Google Maven metadata for com.android.tools:r8 and a HEAD
+          # request on the artifact URL below returned 200; the jar
+          # contains com/android/tools/r8/D8.class.
+          curl -fL --retry 3 --retry-delay 5 \
+            "https://dl.google.com/dl/android/maven2/com/android/tools/r8/8.10.24/r8-8.10.24.jar" \
+            -o "$RUNNER_TEMP/r8-8.10.24.jar"
+          ls -l "$RUNNER_TEMP/r8-8.10.24.jar"
+          python3 -c "
+          import sys, zipfile
+          z = zipfile.ZipFile('$RUNNER_TEMP/r8-8.10.24.jar')
+          assert 'com/android/tools/r8/D8.class' in z.namelist(), 'r8 jar has no D8 class'
+          print('r8 8.10.24 jar ok')
+          "
+
+      - name: Cache Lineage guest image
+        id: vda-cache
+        uses: actions/cache@v4
+        with:
+          path: vda-cache
+          key: husk-vda-v12
+
+      - name: Download Lineage guest image if not cached
+        run: |
+          mkdir -p vda-cache
+          if [ -f vda-cache/vda-v12.qcow2 ]; then
+            echo "guest image already cached"
+          else
+            curl -fL --retry 3 --retry-delay 5 \
+              "https://github.com/Leviidev/Husk/releases/download/lineage-v2/vda-v12.qcow2" \
+              -o vda-cache/vda-v12.qcow2.part
+            mv vda-cache/vda-v12.qcow2.part vda-cache/vda-v12.qcow2
+          fi
+          ls -lh vda-cache/vda-v12.qcow2
+
+      - name: Extract APEX root from guest image
+        run: |
+          set -euo pipefail
+          WORK="$GITHUB_WORKSPACE/java-work"
+          mkdir -p "$WORK/apex-root"
+          DEBUGFS="$(command -v debugfs || echo /opt/homebrew/opt/e2fsprogs/sbin/debugfs)"
+          test -x "$DEBUGFS" || { echo "debugfs not found at $DEBUGFS" >&2; exit 1; }
+          echo "==> converting guest image to raw"
+          qemu-img convert -O raw vda-cache/vda-v12.qcow2 "$WORK/vda.raw"
+          ls -lh "$WORK/vda.raw"
+          echo "==> carving system.img out of the super partition"
+          python3 - "$WORK/vda.raw" "$WORK" <<'PYEOF'
+          import struct, sys
+          raw_path, work = sys.argv[1], sys.argv[2]
+          with open(raw_path, 'rb') as f:
+              # GPT header at LBA1; partition entries start at the LBA
+              # named by the header (normally LBA2), 128 bytes each.
+              # This replaces the `gpt` tool, which is absent on the
+              # macOS runner: parse the header and entries directly.
+              f.seek(512)
+              hdr = f.read(512)
+              assert hdr[0:8] == b'EFI PART', 'no GPT header'
+              entry_lba, num_entries, entry_size = struct.unpack_from('<QII', hdr, 72)
+              f.seek(entry_lba * 512)
+              entries = f.read(num_entries * entry_size)
+              super_start = None
+              second_start = None
+              for i in range(num_entries):
+                  e = entries[i * entry_size:(i + 1) * entry_size]
+                  first_lba, _last = struct.unpack_from('<QQ', e, 32)
+                  if first_lba == 0:
+                      continue
+                  try:
+                      name = e[56:56 + 72].decode('utf-16le').split('\x00')[0]
+                  except Exception:
+                      name = ''
+                  if i == 1:
+                      second_start = first_lba
+                  if name == 'super':
+                      super_start = first_lba
+              start = super_start if super_start is not None else second_start
+              assert start, 'super partition not found in GPT'
+              base = start * 512
+              # Logical-partition metadata, exactly as in upstream
+              # scripts/build_android_system.sh: header at base + 12288.
+              f.seek(base + 12288)
+              h = f.read(256)
+              magic, _, _, hsize = struct.unpack_from('<IHHI', h, 0)
+              assert magic == 0x414C5030, 'no logical partition metadata'
+              o = 12 + 32
+              tsize = struct.unpack_from('<I', h, o)[0]
+              o += 4 + 32
+              descs = [struct.unpack_from('<III', h, o + 12 * i) for i in range(4)]
+              f.seek(base + 12288 + hsize)
+              T = f.read(tsize)
+              (po, pn, ps), (eo, en, es) = descs[0], descs[1]
+              ext = [struct.unpack_from('<QIQI', T, eo + es * i) for i in range(en)]
+              found = False
+              for i in range(pn):
+                  e = T[po + ps * i:po + ps * (i + 1)]
+                  name = e[:36].split(b'\0')[0].decode()
+                  _, fi, ne, _ = struct.unpack_from('<IIII', e, 36)
+                  if name != 'system':
+                      continue
+                  with open(work + '/system.img', 'wb') as w:
+                      for j in range(fi, fi + ne):
+                          nsec, _, data, _ = ext[j]
+                          f.seek(base + data * 512)
+                          left = nsec * 512
+                          while left:
+                              b = f.read(min(left, 64 << 20))
+                              w.write(b)
+                              left -= len(b)
+                  found = True
+                  break
+              assert found, 'system logical partition not found'
+          print('system.img carved')
+          PYEOF
+          ls -lh "$WORK/system.img"
+          echo "==> dumping APEX containers from system.img"
+          for apex in art i18n conscrypt tzdata; do
+            echo "--- com.android.$apex ---"
+            "$DEBUGFS" -R "dump /system/apex/com.android.$apex.capex $WORK/$apex.capex" "$WORK/system.img" 2>/dev/null
+            test -s "$WORK/$apex.capex" || { echo "missing capex for $apex" >&2; exit 1; }
+          done
+          echo "==> unwrapping APEX payloads"
+          # Kept out of the shell loop on purpose: a heredoc delimiter
+          # inside a loop body would not sit at the script's base indent
+          # after YAML dedenting, and bash would not recognise it.
+          python3 - "$WORK" <<'PYEOF'
+          import sys, zipfile
+          work = sys.argv[1]
+          for apex in ('art', 'i18n', 'conscrypt', 'tzdata'):
+              z = zipfile.ZipFile(work + '/' + apex + '.capex')
+              if 'original_apex' in z.namelist():
+                  z = zipfile.ZipFile(z.open('original_apex'))
+              open(work + '/' + apex + '.img', 'wb').write(z.read('apex_payload.img'))
+              print(apex + ' payload unwrapped')
+          PYEOF
+          echo "==> rdumping payloads into the staging root"
+          for apex in art i18n conscrypt tzdata; do
+            mkdir -p "$WORK/apex-root/com.android.$apex"
+            "$DEBUGFS" -R "rdump / $WORK/apex-root/com.android.$apex" "$WORK/$apex.img" 2>/dev/null || true
+          done
+          echo "==> dumping framework files from system.img"
+          "$DEBUGFS" -R "dump /system/framework/org.apache.http.legacy.jar $WORK/org.apache.http.legacy.jar" "$WORK/system.img" 2>/dev/null
+          "$DEBUGFS" -R "dump /system/framework/framework-res.apk $WORK/framework-res.apk" "$WORK/system.img" 2>/dev/null
+          test -s "$WORK/org.apache.http.legacy.jar" || { echo "org.apache.http.legacy.jar not dumped" >&2; exit 1; }
+          test -s "$WORK/framework-res.apk" || { echo "framework-res.apk not dumped" >&2; exit 1; }
+          echo "==> checking the staged boot jars before the runtime build"
+          test -f "$WORK/apex-root/com.android.art/javalib/core-oj.jar" || { echo "staged core-oj.jar missing" >&2; exit 1; }
+          test -f "$WORK/apex-root/com.android.art/javalib/core-libart.jar" || { echo "staged core-libart.jar missing" >&2; exit 1; }
+          test -f "$WORK/apex-root/com.android.i18n/javalib/core-icu4j.jar" || { echo "staged core-icu4j.jar missing" >&2; exit 1; }
+          test -f "$WORK/apex-root/com.android.conscrypt/javalib/conscrypt.jar" || { echo "staged conscrypt.jar missing" >&2; exit 1; }
+          du -sh "$WORK/apex-root" "$WORK/system.img"
+
+      - name: Build java-runtime from the staged APEX root
+        run: |
+          set -euo pipefail
+          HUSK_AOSP=0 \
+          HUSK_JDK="$JAVA_HOME" \
+          HUSK_D8="$RUNNER_TEMP/r8-8.10.24.jar" \
+          HTTP_LEGACY="$GITHUB_WORKSPACE/java-work/org.apache.http.legacy.jar" \
+          FRAMEWORK_RES="$GITHUB_WORKSPACE/java-work/framework-res.apk" \
+          ./scripts/build_java_runtime.sh "$GITHUB_WORKSPACE/java-work/apex-root"
+          du -sh build/java-runtime
+          find build/java-runtime -maxdepth 4 -type f | sort | head -60
+
+      - name: Guard java-runtime boot jars
+        run: |
+          set -euo pipefail
+          test -f build/java-runtime/com.android.art/javalib/core-oj.jar || { echo "MISSING core-oj.jar" >&2; exit 1; }
+          test -f build/java-runtime/com.android.art/javalib/core-libart.jar || { echo "MISSING core-libart.jar" >&2; exit 1; }
+          test -f build/java-runtime/husk-framework.dex || { echo "MISSING husk-framework.dex" >&2; exit 1; }
+          echo "java-runtime guard passed:"
+          ls -lh build/java-runtime/com.android.art/javalib/core-oj.jar build/java-runtime/com.android.art/javalib/core-libart.jar build/java-runtime/husk-framework.dex
+
       - name: Raise deployment target to iOS 16.0
         run: |
           # Upstream project.yml targets iOS 15.5 (with Compat15.swift
@@ -140,7 +339,6 @@ jobs:
           name: Husk-zh-IPA
           path: |
             build/Husk-zh.ipa
-            build/Husk-zh.tipa
           retention-days: 7
           if-no-files-found: error
 
