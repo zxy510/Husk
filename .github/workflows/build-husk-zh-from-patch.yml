@@ -14,10 +14,11 @@ name: Build Husk zh-Hans IPA
 #   4. When it finishes, download the Husk-zh-IPA artifact and install
 #      the .ipa with SideStore / AltStore (not the .tipa on iOS 27).
 # NOTE: PATCH_URL below is a Muse storage link that expires
-# 2026-11-03 10:10 UTC. Create the workflow file and start the build
-# before then; the build downloads the patch at its start, so it only
-# needs to be alive when the run begins. If it has expired, ask for a
-# fresh patch link and update PATCH_URL.
+# 2026-11-03 14:20 UTC (22:20 Beijing). Create the workflow file and start
+# the build before then; the build downloads the patch at its start, so
+# it only needs to be alive when the run begins. If it has expired, ask
+# for a fresh patch link and update PATCH_URL. This v2 patch covers the
+# v1 JIT/onboarding strings plus the Settings tab rows (SettingsTab).
 
 on:
   workflow_dispatch:
@@ -28,7 +29,7 @@ permissions:
   contents: read
 
 env:
-  PATCH_URL: https://muse.ai/files/1378837521970292/2311068493009111/voxe1h61e9bont1aj0k4p9j2/Husk-zh-JIT.patch
+  PATCH_URL: https://muse.ai/files/1378837521970292/2785156265213949/sfpu7zy1cn3fi3xq4cqi1uxf/Husk-zh-v2.patch
 
 jobs:
   build:
