@@ -54,7 +54,12 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew install meson ninja pkg-config xcodegen cmake
+          brew install meson ninja pkg-config xcodegen cmake qemu
+          # The Xcode build phase needs a host qemu-img to create the
+          # firmware/userdata qcow2 seeds, but Husk's own QEMU build uses
+          # --disable-tools and never provides one, so a fresh runner
+          # fails at "app + IPA" with "qemu-img is required". Homebrew's
+          # qemu supplies it.
           # virglrenderer's meson setup fails on a fresh runner with
           # "/opt/homebrew/bin/python3 is missing modules: yaml".
           # Homebrew's python is externally managed, so pip needs
