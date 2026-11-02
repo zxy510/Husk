@@ -227,8 +227,18 @@ jobs:
           echo "==> dumping APEX containers from system.img"
           for apex in art i18n conscrypt tzdata; do
             echo "--- com.android.$apex ---"
-            "$DEBUGFS" -R "dump /system/apex/com.android.$apex.capex $WORK/$apex.capex" "$WORK/system.img" 2>/dev/null
-            test -s "$WORK/$apex.capex" || { echo "missing capex for $apex" >&2; exit 1; }
+            # Verified 2026-11-02 against the real vda-v12 system.img:
+            # art and conscrypt ship as .capex, but i18n and tzdata ship
+            # as plain .apex (run #8 failed here assuming all four are
+            # .capex). Try .capex first, then .apex; the local filename
+            # stays .capex because the unwrap step reads it as a ZIP
+            # either way (plain .apex carries apex_payload.img directly,
+            # .capex wraps it in original_apex, both handled there).
+            "$DEBUGFS" -R "dump /system/apex/com.android.$apex.capex $WORK/$apex.capex" "$WORK/system.img" 2>/dev/null || true
+            if [ ! -s "$WORK/$apex.capex" ]; then
+              "$DEBUGFS" -R "dump /system/apex/com.android.$apex.apex $WORK/$apex.capex" "$WORK/system.img" 2>/dev/null || true
+            fi
+            test -s "$WORK/$apex.capex" || { echo "missing APEX container for $apex (tried .capex and .apex)" >&2; exit 1; }
           done
           echo "==> unwrapping APEX payloads"
           # Kept out of the shell loop on purpose: a heredoc delimiter
